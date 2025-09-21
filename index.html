@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jelly Run — Single File</title>
+  <style>
+    :root{
+      --bg1:#0f172a; /* deep navy */
+      --bg2:#06203a; /* darker teal */
+      --accent:#ffd166; /* gold */
+      --jelly1:#7dd3fc; /* light blue */
+      --jelly2:#60a5fa; /* blue */
+      --platform:#0b6e4f;
+    }
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    body{
+      display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,var(--bg1),var(--bg2));
+      color:#fff;
+      -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+    }
+    #gameWrap{width:min(900px,95vw);aspect-ratio:16/9;box-shadow:0 10px 40px rgba(2,6,23,.6);border-radius:14px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.05));position:relative}
+    canvas{display:block;width:100%;height:100%;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.04));}
+    .ui{position:absolute;left:12px;top:12px;font-weight:600;text-shadow:0 2px 8px rgba(0,0,0,.6)}
+    .centerPanel{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .panel{background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(0,0,0,0.15));backdrop-filter:blur(6px);border-radius:12px;padding:18px 22px;text-align:center;pointer-events:auto}
+    button{appearance:none;border:0;background:var(--accent);color:#06203a;padding:10px 16px;border-radius:10px;font-weight:700;cursor:pointer}
+    p.small{font-size:13px;margin:.25rem 0;color:rgba(255,255,255,.9)}
+    .muted{opacity:.85;font-weight:500}
+    .hint{position:absolute;right:12px;bottom:12px;font-size:13px;opacity:.9}
+    @media (max-width:520px){#gameWrap{aspect-ratio:3/4}}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="c"></canvas>
+    <div class="ui" id="score">Score: 0</div>
+    <div class="hint">Space / Tap to jump • Collect coins • Avoid spikes</div>
+    <div class="centerPanel" id="overlay">
+      <div class="panel" id="menu">
+        <h2 style="margin:0 0 6px;">Jelly Run</h2>
+        <p class="small muted">A tiny single-file runner — made to paste into an HTML file and open in your browser.</p>
+        <p class="small">Jump to avoid spikes, land on platforms, collect coins. The jelly wobbles!</p>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:10px">
+          <button id="startBtn">Start</button>
+          <button id="muteBtn">Mute</button>
+        </div>
+        <p class="small" style="margin-top:10px">High score: <span id="hi">0</span></p>
+      </div>
+    </div>
+  </div>
+
+<script>
+// Jelly Run - Single-file (HTML + JS) game
+// Controls: Space / Up Arrow / Click / Tap
+// Copy this file as index.html and open in a browser. Host on GitHub Pages to make it a website.
+
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W, H, scale;
+  function resize(){
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * devicePixelRatio;
+    canvas.height = rect.height * devicePixelRatio;
+    W = canvas.width; H = canvas.height; scale = devicePixelRatio;
+    ctx.setTransform(scale,0,0,scale,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Game state
+  let running = false;
+  let score = 0;
+  let high = Number(localStorage.getItem('jelly_high') || 0);
+  document.getElementById('hi').textContent = high;
+  const scoreEl = document.getElementById('score');
+  const overlay = document.getElementById('overlay');
+  const menu = document.getElementById('menu');
+  const startBtn = document.getElementById('startBtn');
+  const muteBtn = document.getElementById('muteBtn');
+  let muted = false;
+
+  // Sounds (minimal — WebAudio)
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const actx = AudioCtx ? new AudioCtx() : null;
+  function playTone(freq, length=0.08, vol=0.06){
+    if(muted || !actx) return;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(actx.destination);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + length);
+    o.stop(actx.currentTime + length + 0.02);
+  }
+
+  // Player (the jelly)
+  const player = {
+    x: 140, y: 0, r: 20, vy:0, onGround:false, wobble:0
+  };
+
+  // Level elements - platforms, obstacles, coins
+  let platforms = [];
+  let obstacles = [];
+  let coins = [];
+  let speed = 3.2; // global scroll speed
+  let spawnTimer = 0;
+
+  function reset(){
+    score = 0; speed = 3.2; spawnTimer = 0;
+    player.y = 200; player.vy = 0; player.onGround = false; player.wobble = 0;
+    platforms = [{x:0,y:260,w:1000,h:40}];
+    obstacles = [];
+    coins = [];
+  }
+
+  function start(){
+    reset(); running = true; overlay.style.display='none';
+    if(actx && actx.state==='suspended') actx.resume();
+    last = performance.now();
+    loop(last);
+  }
+
+  function gameOver(){
+    running = false; overlay.style.display='flex'; menu.querySelector('h2').textContent = 'Game Over';
+    menu.querySelector('.small.muted').textContent = 'Tap Start to play again.';
+    menu.querySelector('#startBtn').textContent = 'Retry';
+    if(score > high){ high = score; localStorage.setItem('jelly_high', high); document.getElementById('hi').textContent = high; }
+    playTone(120,0.18,0.08);
+  }
+
+  // Helpers
+  function rectsOverlap(a,b){
+    return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+  }
+
+  // Spawn logic
+  function spawnColumn(){
+    // Decide platform height randomly and possibly place an obstacle and coin
+    const minY = Math.floor(H/3); const maxY = Math.floor(H - 120);
+    const y = Math.floor(Math.random() * (maxY - minY)) + minY;
+    const w = Math.floor(140 + Math.random()*200);
+    const p = {x: W/scale + 40, y: y, w: w, h: 34};
+    platforms.push(p);
+    // obstacle
+    if(Math.random() < Math.min(0.45, 0.15 + score/200)){
+      const ox = p.x + Math.random()*(p.w-20) + 20;
+      obstacles.push({x:ox, y:p.y - 18, w:18, h:18});
+    }
+    // coin cluster
+    if(Math.random() < 0.6){
+      const cx = p.x + 30; const cy = p.y - 40;
+      coins.push({x:cx, y:cy, r:7, taken:false});
+      if(Math.random() < 0.5) coins.push({x:cx+28, y:cy-8, r:6, taken:false});
+    }
+  }
+
+  // Physics & updates
+  function update(dt){
+    // player physics
+    const gravity = 1500; // px/s^2
+    player.vy += gravity * dt;
+    player.y += player.vy * dt;
+    player.wobble += dt * (player.vy * 0.002);
+
+    // ground collision (platforms)
+    player.onGround = false;
+    for(let p of platforms){
+      const px1 = p.x - 6; const px2 = p.x + p.w + 6;
+      if(player.x + player.r > px1 && player.x - player.r < px2){
+        const groundY = p.y - player.r;
+        if(player.y > groundY && player.vy >= 0 && player.y - player.vy*dt <= groundY + 4){
+          player.y = groundY; player.vy = 0; player.onGround = true;
+        }
+      }
+    }
+
+    // death if falls below
+    if(player.y - player.r > H/scale){ gameOver(); }
+
+    // scroll platforms and obstacles left
+    for(let p of platforms){ p.x -= speed; }
+    for(let o of obstacles){ o.x -= speed; }
+    for(let c of coins){ c.x -= speed; }
+
+    // remove off-screen
+    platforms = platforms.filter(p => p.x + p.w > -200);
+    obstacles = obstacles.filter(o => o.x + o.w > -100);
+    coins = coins.filter(c => c.x + 20 > -100 && !c.taken);
+
+    // spawn new
+    spawnTimer -= dt * 1000;
+    if(spawnTimer <= 0){ spawnTimer = 700 + Math.random()*700; spawnColumn(); }
+
+    // collision with obstacles
+    for(let o of obstacles){
+      const box = {x:o.x, y:o.y, w:o.w, h:o.h};
+      const pj = {x: player.x - player.r, y: player.y - player.r, w: player.r*2, h: player.r*2};
+      if(rectsOverlap(box,pj)){ gameOver(); playTone(140,0.12,0.09); }
+    }
+
+    // collect coins
+    for(let c of coins){
+      const dx = c.x - player.x; const dy = c.y - player.y; const d2 = dx*dx + dy*dy;
+      if(!c.taken && d2 < Math.pow(c.r + player.r*0.6,2)){
+        c.taken = true; score += 5; playTone(880,0.06,0.04);
+      }
+    }
+
+    // speed ramp
+    speed += dt * 0.18;
+    score += Math.floor(dt * 60 * (0.6 + speed/10));
+  }
+
+  // Jump
+  function jump(){
+    if(!running) return; if(player.onGround){ player.vy = -620; player.onGround = false; playTone(420,0.08,0.06);} 
+  }
+
+  // Input
+  window.addEventListener('keydown', e=>{ if([' ', 'ArrowUp', 'KeyW'].includes(e.key)) { e.preventDefault(); jump(); } });
+  canvas.addEventListener('pointerdown', e=>{ jump(); });
+  startBtn.addEventListener('click', ()=> start());
+  muteBtn.addEventListener('click', ()=>{ muted = !muted; muteBtn.textContent = muted ? 'Unmute' : 'Mute'; });
+
+  // Drawing
+  function draw(){
+    // clear
+    ctx.clearRect(0,0,W/scale,H/scale);
+
+    // background parallax
+    const grad = ctx.createLinearGradient(0,0,0,H/scale);
+    grad.addColorStop(0,'#07142a'); grad.addColorStop(1,'#042b3e');
+    ctx.fillStyle = grad; ctx.fillRect(0,0,W/scale,H/scale);
+
+    // sun / glow
+    const gx = (performance.now()/50) % (W/scale);
+    ctx.save(); ctx.globalAlpha = 0.06; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(W/scale - 180, 100, 120, 60, 0,0,Math.PI*2); ctx.fill(); ctx.restore();
+
+    // draw platforms
+    for(let p of platforms){
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.fillRect(p.x+6, p.y+6, p.w, p.h);
+      // platform body
+      const g = ctx.createLinearGradient(p.x, p.y, p.x, p.y + p.h);
+      g.addColorStop(0,'#0bb07a'); g.addColorStop(1,'#0b6e4f');
+      ctx.fillStyle = g; roundRect(ctx, p.x, p.y, p.w, p.h, 8); ctx.fill();
+    }
+
+    // draw coins
+    for(let c of coins){ if(c.taken) continue; ctx.save(); ctx.translate(c.x, c.y); ctx.beginPath(); ctx.arc(0,0,c.r,0,Math.PI*2); ctx.fillStyle='#ffd166'; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='rgba(0,0,0,0.12)'; ctx.stroke(); ctx.restore(); }
+
+    // draw obstacles (spikes)
+    for(let o of obstacles){ ctx.fillStyle='#ff6b6b'; ctx.beginPath(); ctx.moveTo(o.x, o.y + o.h); ctx.lineTo(o.x + o.w/2, o.y); ctx.lineTo(o.x + o.w, o.y + o.h); ctx.closePath(); ctx.fill(); ctx.strokeStyle='rgba(0,0,0,0.12)'; ctx.stroke(); }
+
+    // draw player (jelly blob)
+    drawJelly(player.x, player.y, player.r, player.wobble);
+
+    // HUD
+    scoreEl.textContent = 'Score: ' + Math.max(0, Math.floor(score));
+  }
+
+  function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+  function drawJelly(x,y,r,wobble){
+    ctx.save();
+    // wobble effect
+    const wob = Math.sin(wobble*3) * Math.min(6, Math.abs(player.vy*0.02));
+    const rx = r * (1 + wob*0.003), ry = r * (1 - wob*0.004);
+    // gradient fill
+    const g = ctx.createLinearGradient(x-r, y-r, x+r, y+r);
+    g.addColorStop(0,'#7dd3fc'); g.addColorStop(1,'#60a5fa');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI*2); ctx.fill();
+    // highlight
+    ctx.beginPath(); ctx.ellipse(x - r*0.35, y - r*0.4, r*0.3, r*0.18, 0, 0, Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.24)'; ctx.fill();
+    // eyes
+    ctx.fillStyle = '#06203a'; ctx.beginPath(); ctx.ellipse(x - r*0.25, y - r*0.05, r*0.12, r*0.13, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x + r*0.12, y - r*0.05, r*0.07, r*0.08, 0, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  // main loop
+  let last = 0;
+  function loop(now){
+    if(!running) return;
+    const dt = Math.min(0.033, (now - last)/1000);
+    update(dt);
+    draw();
+    last = now;
+    requestAnimationFrame(loop);
+  }
+
+  // initial menu
+  overlay.style.display='flex'; menu.querySelector('h2').textContent = 'Jelly Run'; menu.querySelector('.small.muted').textContent = 'Single-file HTML game — press Start';
+
+  // Prevent page scroll on space
+  window.addEventListener('keydown', e=>{ if(e.key === ' '){ e.preventDefault(); } });
+
+  // Accessibility: resume audio on interaction
+  document.body.addEventListener('pointerdown', ()=>{ if(actx && actx.state === 'suspended') actx.resume(); }, {once:true});
+
+  // Draw a static start preview while idle
+  (function idlePreview(){
+    // simple tiny animation while not running
+    const t0 = performance.now();
+    function frame(){
+      if(running) return;
+      const t = (performance.now() - t0)/1000;
+      // fake small moving elements to make the menu feel alive
+      // update a subtle offscreen platform to show depth
+      ctx.clearRect(0,0,W/scale,H/scale);
+      const grad = ctx.createLinearGradient(0,0,0,H/scale);
+      grad.addColorStop(0,'#07142a'); grad.addColorStop(1,'#042b3e'); ctx.fillStyle=grad; ctx.fillRect(0,0,W/scale,H/scale);
+      // little ground preview
+      ctx.fillStyle='#083f2d'; ctx.fillRect(0, H/scale - 100, W/scale, 100);
+      drawJelly(140, H/scale - 140 + Math.sin(t*2)*4, 20, t*2);
+      requestAnimationFrame(frame);
+    }
+    frame();
+  })();
+
+})();
+</script>
+</body>
+</html>
